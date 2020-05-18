@@ -1,41 +1,51 @@
 #!/bin/bash
 
+if [[ $2 =~ ^[0-9]+$ ]] ; then
+    processes=$2
+else
+    processes=$(nproc)
+fi
+
 install() {
     ## Set up library paths
-
     export PYTHONPATH=$RUNPATH/SuperBuild/install/lib/python2.7/dist-packages:$RUNPATH/SuperBuild/src/opensfm:$PYTHONPATH
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$RUNPATH/SuperBuild/install/lib
 
     ## Before installing
     echo "Updating the system"
-    sudo apt-get update
-
-    sudo add-apt-repository -y ppa:ubuntugis/ppa
-    sudo apt-get update
+    add-apt-repository -y ppa:ubuntugis/ubuntugis-unstable
+    apt-get update
 
     echo "Installing Required Requisites"
-    sudo apt-get install -y -qq build-essential \
+    apt-get install -y -qq build-essential \
                          git \
                          cmake \
                          python-pip \
                          libgdal-dev \
                          gdal-bin \
                          libgeotiff-dev \
-                         pkg-config
+                         pkg-config \
+                         libjsoncpp-dev \
+                         python-gdal \
+                         grass-core \
+                         libssl-dev \
+                         liblas-bin \
+                         swig2.0 \
+                         python-wheel \
+                         libboost-log-dev
 
     echo "Getting CMake 3.1 for MVS-Texturing"
-    sudo apt-get install -y software-properties-common python-software-properties
-    sudo add-apt-repository -y ppa:george-edison55/cmake-3.x
-    sudo apt-get update -y
-    sudo apt-get install -y --only-upgrade cmake
+    apt-get install -y software-properties-common python-software-properties
+    add-apt-repository -y ppa:george-edison55/cmake-3.x
+    apt-get update -y
+    apt-get install -y --only-upgrade cmake
 
     echo "Installing OpenCV Dependencies"
-    sudo apt-get install -y -qq libgtk2.0-dev \
+    apt-get install -y -qq libgtk2.0-dev \
                          libavcodec-dev \
                          libavformat-dev \
                          libswscale-dev \
                          python-dev \
-                         python-numpy \
                          libtbb2 \
                          libtbb-dev \
                          libjpeg-dev \
@@ -47,54 +57,36 @@ install() {
                          libxext-dev \
                          liblapack-dev \
                          libeigen3-dev \
-                         libvtk5-dev
+                         libvtk6-dev
 
     echo "Removing libdc1394-22-dev due to python opencv issue"
-    sudo apt-get remove libdc1394-22-dev
+    apt-get remove libdc1394-22-dev
 
-    ## Installing OpenSfM Requisites
     echo "Installing OpenSfM Dependencies"
-    sudo apt-get install -y -qq python-networkx \
-                         libgoogle-glog-dev \
+    apt-get install -y -qq libgoogle-glog-dev \
                          libsuitesparse-dev \
                          libboost-filesystem-dev \
                          libboost-iostreams-dev \
                          libboost-regex-dev \
                          libboost-python-dev \
                          libboost-date-time-dev \
-                         libboost-thread-dev \
-                         python-pyproj
+                         libboost-thread-dev
 
-    sudo pip install -U PyYAML \
-                        exifread \
-                        gpxpy \
-                        xmltodict \
-                        appsettings
+    pip install -r "${RUNPATH}/requirements.txt"
 
-    echo "Installing CGAL dependencies"
-    sudo apt-get install libgmp-dev libmpfr-dev
-
-    echo "Installing Ecto Dependencies"
-    sudo pip install -U catkin-pkg
-    sudo apt-get install -y -qq python-empy \
-                         python-nose \
-                         python-pyside
-
-    echo "Installing OpenDroneMap Dependencies"
-    sudo apt-get install -y -qq python-pyexiv2 \
-                         python-scipy \
-                         jhead \
-                         liblas-bin
+    # Fix:  /usr/local/lib/python2.7/dist-packages/requests/__init__.py:83: RequestsDependencyWarning: Old version of cryptography ([1, 2, 3]) may cause slowdown.
+    pip install --upgrade cryptography
+    python -m easy_install --upgrade pyOpenSSL
 
     echo "Compiling SuperBuild"
     cd ${RUNPATH}/SuperBuild
     mkdir -p build && cd build
-    cmake .. && make -j$(nproc)
+    cmake .. && make -j$processes
 
     echo "Compiling build"
     cd ${RUNPATH}
     mkdir -p build && cd build
-    cmake .. && make -j$(nproc)
+    cmake .. && make -j$processes
 
     echo "Configuration Finished"
 }
@@ -115,7 +107,7 @@ reinstall() {
 
 usage() {
     echo "Usage:"
-    echo "bash configure.sh <install|update|uninstall|help>"
+    echo "bash configure.sh <install|update|uninstall|help> [nproc]"
     echo "Subcommands:"
     echo "  install"
     echo "    Installs all dependencies and modules for running OpenDroneMap"
@@ -125,6 +117,7 @@ usage() {
     echo "    Removes SuperBuild and build modules. Does not uninstall dependencies"
     echo "  help"
     echo "    Displays this message"
+    echo "[nproc] is an optional argument that can set the number of processes for the make -j tag. By default it uses $(nproc)"
 }
 
 if [[ $1 =~ ^(install|reinstall|uninstall|usage)$ ]]; then

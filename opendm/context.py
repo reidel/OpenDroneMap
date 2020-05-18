@@ -4,10 +4,11 @@ from opendm import io
 import multiprocessing
 
 # Define some needed locations
-scripts_path = os.path.abspath(os.path.dirname(__file__))
-root_path, _ = os.path.split(scripts_path)
+current_path = os.path.abspath(os.path.dirname(__file__))
+root_path, _ = os.path.split(current_path)
 
 superbuild_path = os.path.join(root_path, 'SuperBuild')
+superbuild_bin_path = os.path.join(superbuild_path, 'install', 'bin')
 tests_path = os.path.join(root_path, 'tests')
 tests_data_path = os.path.join(root_path, 'tests/test_data')
 
@@ -17,15 +18,19 @@ sys.path.append(pyopencv_path)
 
 # define opensfm path
 opensfm_path = os.path.join(superbuild_path, "src/opensfm")
-ccd_widths_path = os.path.join(opensfm_path, 'opensfm/data/sensor_data.json')
 
 # define orb_slam2 path
 orb_slam2_path = os.path.join(superbuild_path, "src/orb_slam2")
 
-# define pmvs path
-cmvs_path = os.path.join(superbuild_path, "install/bin/cmvs")
-cmvs_opts_path = os.path.join(superbuild_path, "install/bin/genOption")
-pmvs2_path = os.path.join(superbuild_path, "install/bin/pmvs2")
+# define mve join_paths
+makescene_path = os.path.join(superbuild_path, 'src', 'elibs', 'mve', 'apps', 'makescene', 'makescene') #TODO: don't install in source
+dmrecon_path = os.path.join(superbuild_path, 'src', 'elibs', 'mve', 'apps', 'dmrecon', 'dmrecon')
+scene2pset_path = os.path.join(superbuild_path, 'src', 'elibs', 'mve', 'apps', 'scene2pset', 'scene2pset')
+meshclean_path = os.path.join(superbuild_path, 'src', 'elibs', 'mve', 'apps', 'meshclean', 'meshclean')
+
+poisson_recon_path = os.path.join(superbuild_path, 'src', 'PoissonRecon', 'Bin', 'Linux', 'PoissonRecon')
+dem2mesh_path = os.path.join(superbuild_path, 'src', 'dem2mesh', 'dem2mesh')
+dem2points_path = os.path.join(superbuild_path, 'src', 'dem2points', 'dem2points')
 
 # define mvstex path
 mvstex_path = os.path.join(superbuild_path, "install/bin/texrecon")
@@ -41,7 +46,7 @@ odm_modules_src_path = os.path.join(root_path, "modules")
 settings_path = os.path.join(root_path, 'settings.yaml')
 
 # Define supported image extensions
-supported_extensions = {'.jpg','.jpeg','.png'}
+supported_extensions = {'.jpg','.jpeg','.png', '.tif', '.tiff'}
 
-# Define the number of cores 
+# Define the number of cores
 num_cores = multiprocessing.cpu_count()

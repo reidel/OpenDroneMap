@@ -1,3 +1,7 @@
+// to format log_ output; version 2018-02-18, skip gcp comments and empty lines.
+#include <iostream>
+#include <iomanip>
+using namespace std;
 // PCL
 #include <pcl/io/obj_io.h>
 #include <pcl/common/transforms.h>
@@ -11,11 +15,11 @@
 
 std::ostream& operator<<(std::ostream &os, const GeorefSystem &geo)
 {
-    return os << geo.system_ << "\n" << static_cast<int>(geo.eastingOffset_) << " " << static_cast<int>(geo.northingOffset_);
+    return os << setiosflags(ios::fixed) << setprecision(7) << geo.system_ << "\n" << geo.eastingOffset_ << " " << geo.northingOffset_;
 }
 
 GeorefGCP::GeorefGCP()
-    :x_(0.0), y_(0.0), z_(0.0), use_(false), localX_(0.0), localY_(0.0), localZ_(0.0),cameraIndex_(0), pixelX_(0), pixelY_(0.0), image_("")
+    :x_(0.0), y_(0.0), z_(0.0), use_(false), localX_(0.0), localY_(0.0), localZ_(0.0),cameraIndex_(0), pixelX_(0.0), pixelY_(0.0), image_(""), idgcp_("")
 {
 }
 
@@ -25,7 +29,8 @@ GeorefGCP::~GeorefGCP()
 
 void GeorefGCP::extractGCP(std::istringstream &gcpStream)
 {
-    gcpStream >> x_ >> y_ >> z_ >> pixelX_ >> pixelY_ >> image_;
+//        gcpStream >> x_ >> y_ >> z_ >> pixelX_ >> pixelY_ >> image_; 
+        gcpStream >> x_ >> y_ >> z_ >> pixelX_ >> pixelY_ >> image_ >> idgcp_;
 }
 
 Vec3 GeorefGCP::getPos()
@@ -190,6 +195,20 @@ Vec3 GeorefCamera::getReferencedPos()
     return Vec3(easting_,northing_,altitude_);
 }
 
+bool GeorefCamera::isValid()
+{
+    return focalLength_ != 0 &&
+           ((*transform_)(0, 0) != 0 ||
+           (*transform_)(0, 1) != 0 ||
+           (*transform_)(0, 2) != 0 ||
+           (*transform_)(1, 0) != 0 ||
+           (*transform_)(1, 1) != 0 ||
+           (*transform_)(1, 2) != 0 ||
+           (*transform_)(2, 0) != 0 ||
+           (*transform_)(2, 1) != 0 ||
+           (*transform_)(2, 2) != 0);
+}
+
 std::ostream& operator<<(std::ostream &os, const GeorefCamera &cam)
 {
     os << "Focal, k1, k2 : " << cam.focalLength_ << ", " << cam.k1_ << ", " << cam.k2_ << "\n";
@@ -222,8 +241,10 @@ Georef::Georef() : log_(false)
     outputCoordFilename_ = "";
     inputObjFilename_ = "";
     outputObjFilename_ = "";
+    transformFilename_ = "";
     exportCoordinateFile_ = false;
     exportGeorefSystem_ = false;
+    useTransform_ = false;
 }
 
 Georef::~Georef()
@@ -272,12 +293,14 @@ void Georef::parseArguments(int argc, char *argv[])
     bool imageListSpecified = false;
     bool gcpFileSpecified = false;
     bool imageLocation = false;
-    bool bundleResized = false;
+    // bool bundleResized = false;
     bool outputCoordSpecified = false;
     bool inputCoordSpecified = false;
     
     logFile_ = std::string(argv[0]) + "_log.txt";
     log_ << logFile_ << "\n";
+    
+    finalTransformFile_ = std::string(argv[0]) + "_transform.txt";
     
     // If no arguments were passed, print help.
     if (argc == 1)
@@ -319,6 +342,21 @@ void Georef::parseArguments(int argc, char *argv[])
                 throw GeorefException("Argument '" + argument + "' has a bad value.");
             }
             log_ << "Log file path was set to: " << logFile_ << "\n";
+        }
+        else if (argument == "-outputTransformFile")
+        {
+            ++argIndex;
+            if (argIndex >= argc)
+            {
+                throw GeorefException("Missing argument for '" + argument + "'.");
+            }
+            finalTransformFile_ = std::string(argv[argIndex]);
+            std::ofstream testFile(logFile_.c_str());
+            if (!testFile.is_open())
+            {
+                throw GeorefException("Argument '" + argument + "' has a bad value.");
+            }
+            log_ << "Transform file path was set to: " << finalTransformFile_ << "\n";
         }
         else if(argument == "-bundleFile" && argIndex < argc)
         {
@@ -374,6 +412,16 @@ void Georef::parseArguments(int argc, char *argv[])
             log_ << "Reading point cloud from: " << inputPointCloudFilename_ << "\n";
             georeferencePointCloud_ = true;
         }
+        else if(argument == "-outputPointCloudSrs" && argIndex < argc)
+        {
+            argIndex++;
+            if (argIndex >= argc)
+            {
+                throw GeorefException("Argument '" + argument + "' expects 1 more input following it, but no more inputs were provided.");
+            }
+            outputPointCloudSrs_ = std::string(argv[argIndex]);
+            log_ << "Using SRS for point cloud: " << outputPointCloudSrs_ << "\n";
+        }
         else if(argument == "-gcpFile" && argIndex < argc)
         {
             argIndex++;
@@ -384,6 +432,17 @@ void Georef::parseArguments(int argc, char *argv[])
             gcpFilename_ = std::string(argv[argIndex]);
             log_ << "Reading GCPs from: " << gcpFilename_ << "\n";
             gcpFileSpecified = true;
+        }
+        else if(argument == "-inputTransformFile" && argIndex < argc)
+        {
+            argIndex++;
+            if (argIndex >= argc)
+            {
+                throw GeorefException("Argument '" + argument + "' expects 1 more input following it, but no more inputs were provided.");
+            }
+            transformFilename_ = std::string(argv[argIndex]);
+            log_ << "Reading transform file from: " << gcpFilename_ << "\n";
+            useTransform_ = true;
         }
         else if(argument == "-imagesListPath" && argIndex < argc)
         {
@@ -418,7 +477,7 @@ void Georef::parseArguments(int argc, char *argv[])
             log_ << "Georef file output path is set to: " << georefFilename_ << "\n";
             exportGeorefSystem_ = true;
         }
-        else if(argument == "-bundleResizedTo" && argIndex < argc)
+        /*else if(argument == "-bundleResizedTo" && argIndex < argc)
         {
             argIndex++;
             if (argIndex >= argc)
@@ -433,7 +492,7 @@ void Georef::parseArguments(int argc, char *argv[])
             }
             log_ << "Bundle resize value is set to: " << bundleResizedTo_ << "\n";
             bundleResized = true;
-        }
+        }*/
         else if(argument == "-outputFile" && argIndex < argc)
         {
             argIndex++;
@@ -468,7 +527,7 @@ void Georef::parseArguments(int argc, char *argv[])
         throw GeorefException("Both output and input coordfile specified, only one of those are accepted.");
     }
 
-    if (imageListSpecified && gcpFileSpecified && imageLocation && bundleResized)
+    if (imageListSpecified && gcpFileSpecified && imageLocation ) // && bundleResized)
     {
         useGCP_ = true;
     }
@@ -527,20 +586,26 @@ void Georef::printHelp()
     log_ << "\"-inputPointCloudFile <path>\" (optional)" << "\n";
     log_ << "\"Input ply file that must contain a point cloud.\n\n";
 
+    log_ << "\"-inputTransformFile <path>\" (optional)" << "\n";
+    log_ << "\"Input transform file that is a 4x4 matrix of transform values.\n\n";
+
     log_ << "\"-imagesListPath <path>\" (mandatory if using ground control points)\n";
     log_ << "Path to the list containing the image names used in the bundle.out file.\n\n";
 
     log_ << "\"-imagesPath <path>\" (mandatory if using ground control points)\n";
     log_ << "Path to the folder containing full resolution images.\n\n";
 
-    log_ << "\"-bundleResizedTo <integer>\" (mandatory if using ground control points)\n";
-    log_ << "The resized resolution used in bundler.\n\n";
+    // log_ << "\"-bundleResizedTo <integer>\" (mandatory if using ground control points)\n";
+    // log_ << "The resized resolution used in bundler.\n\n";
     
     log_ << "\"-outputFile <path>\" (optional, default <inputFile>_geo)" << "\n";
-    log_ << "\"Output obj file that will contain the georeferenced texture mesh.\n\n";
+    log_ << "Output obj file that will contain the georeferenced texture mesh.\n\n";
 
     log_ << "\"-outputPointCloudFile <path>\" (mandatory if georeferencing a point cloud)" << "\n";
-    log_ << "\"Output ply file that will contain the georeferenced point cloud.\n\n";
+    log_ << "Output las/laz file that will contain the georeferenced point cloud.\n\n";
+    
+    log_ << "\"-outputPointCloudSrs <srs>\" (recommended if georeferencing a point cloud)" << "\n";
+    log_ << "Output spatial reference system to use for output point cloud.\n\n";
     
     log_.setIsPrintingInCout(printInCoutPop);
 }
@@ -592,6 +657,10 @@ void Georef::createGeoreferencedModel()
     if (useGCP_)
     {
         createGeoreferencedModelFromGCPData();
+    }
+    else if (useTransform_)
+    {
+        createGeoreferencedModelFromSFM();
     }
     else
     {
@@ -656,11 +725,19 @@ void Georef::readGCPs()
     {
         std::istringstream istr(gcpString);
         GeorefGCP gcp;
+      
+        if ( gcpString.empty() )  {
+            continue;
+        }
+        if ( istr.peek() == '#' ) {                         /* skip comments */
+            continue; 
+        }
         gcp.extractGCP(istr);
         gcps_.push_back(gcp);
         ++nrGCPs;
 
-        log_<<"x_: "<<gcp.x_<<" y_: "<<gcp.y_<<" z_: "<<gcp.z_<<" pixelX_: "<<gcp.pixelX_<<" pixelY_: "<<gcp.pixelY_<<" image: "<<gcp.image_<<"\n";
+//        log_<<"x_: "<<gcp.x_<<" y_: "<<gcp.y_<<" z_: "<<gcp.z_<<" pixelX_: "<<gcp.pixelX_<<" pixelY_: "<<gcp.pixelY_<<" image: "<<gcp.image_<<"\n";
+        log_<< setiosflags(ios::fixed) << setprecision(3) << "x_: " << gcp.x_ << " y_: " << gcp.y_<< " z_: " << gcp.z_ <<" pixelX_: " << gcp.pixelX_ << " pixelY_: " << gcp.pixelY_ << " image: " << gcp.image_ << " idgcp_: " << gcp.idgcp_ << '\n';  // more readeable
     }
 
     // Check if the GCPs have corresponding images in the bundle files and if they don't, remove them from the GCP-list
@@ -750,7 +827,7 @@ void Georef::performGeoreferencingWithGCP()
     log_ << "Reading mesh file " << inputObjFilename_ <<"\n";
     log_ << '\n';
     pcl::TextureMesh mesh;
-    if (loadObjFile(inputObjFilename_, mesh) == -1)
+    if (!loadObjFile(inputObjFilename_, mesh))
     {
         throw GeorefException("Error when reading model from:\n" + inputObjFilename_ + "\n");
     }
@@ -780,7 +857,6 @@ void Georef::performGeoreferencingWithGCP()
         cv::Mat image = cv::imread(cam.texture_file);
         cam.height = static_cast<double>(image.rows);
         cam.width = static_cast<double>(image.cols);
-        cam.focal_length *= static_cast<double>(cam.width)/bundleResizedTo_;
 
         // The pixel position for the GCP in pcl-format in order to use pcl-functions
         pcl::PointXY gcpPos;
@@ -877,109 +953,9 @@ void Georef::performGeoreferencingWithGCP()
                              gcps_[gcp0].getReferencedPos(), gcps_[gcp1].getReferencedPos(), gcps_[gcp2].getReferencedPos());
     log_ << "Final transform:\n";
     log_ << transFinal.transform_ << '\n';
-
-    // The tranform used to transform model into the georeferenced system.
-    Eigen::Transform<float, 3, Eigen::Affine> transform;
-
-    transform(0, 0) = static_cast<float>(transFinal.transform_.r1c1_);
-    transform(1, 0) = static_cast<float>(transFinal.transform_.r2c1_);
-    transform(2, 0) = static_cast<float>(transFinal.transform_.r3c1_);
-    transform(3, 0) = static_cast<float>(transFinal.transform_.r4c1_);
-
-    transform(0, 1) = static_cast<float>(transFinal.transform_.r1c2_);
-    transform(1, 1) = static_cast<float>(transFinal.transform_.r2c2_);
-    transform(2, 1) = static_cast<float>(transFinal.transform_.r3c2_);
-    transform(3, 1) = static_cast<float>(transFinal.transform_.r4c2_);
-
-    transform(0, 2) = static_cast<float>(transFinal.transform_.r1c3_);
-    transform(1, 2) = static_cast<float>(transFinal.transform_.r2c3_);
-    transform(2, 2) = static_cast<float>(transFinal.transform_.r3c3_);
-    transform(3, 2) = static_cast<float>(transFinal.transform_.r4c3_);
-
-    transform(0, 3) = static_cast<float>(transFinal.transform_.r1c4_);
-    transform(1, 3) = static_cast<float>(transFinal.transform_.r2c4_);
-    transform(2, 3) = static_cast<float>(transFinal.transform_.r3c4_);
-    transform(3, 3) = static_cast<float>(transFinal.transform_.r4c4_);
-
-    log_ << '\n';
-    log_ << "Applying transform to mesh...\n";
-    // Move the mesh into position.
-    pcl::transformPointCloud(*meshCloud, *meshCloud, transform);
-    log_ << ".. mesh transformed.\n";
-
-    // Update the mesh.
-    pcl::toPCLPointCloud2 (*meshCloud, mesh.cloud);
-
-    // Iterate over each part of the mesh (one per material), to make texture file paths relative the .mtl file.
-    for(size_t t = 0; t < mesh.tex_materials.size(); ++t)
-    {
-        // The material of the current submesh.
-        pcl::TexMaterial& material = mesh.tex_materials[t];
-
-        size_t find = material.tex_file.find_last_of("/\\");
-        if(std::string::npos != find)
-        {
-            material.tex_file = material.tex_file.substr(find + 1);
-        }
-    }
-
-    log_ << '\n';
-    if (saveOBJFile(outputObjFilename_, mesh, 8) == -1)
-    {
-        throw GeorefException("Error when saving model:\n" + outputObjFilename_ + "\n");
-    }
-    else
-    {
-        log_ << "Successfully saved model.\n";
-    }
-
-    if(georeferencePointCloud_)
-    {
-        //pcl::PointCloud2<pcl::PointNormal>::Ptr pointCloud;
-        pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr pointCloud(new pcl::PointCloud<pcl::PointXYZRGBNormal>());
-        if(pcl::io::loadPLYFile<pcl::PointXYZRGBNormal> (inputPointCloudFilename_.c_str(), *pointCloud.get()) == -1) {
-            throw GeorefException("Error when reading point cloud:\n" + inputPointCloudFilename_ + "\n");
-        }
-        else
-        {
-            log_ << "Successfully loaded " << pointCloud->size() << " points with corresponding normals from file.\n";
-        }
-        log_ << '\n';
-        log_ << "Applying transform to point cloud...\n";
-        pcl::transformPointCloud(*pointCloud, *pointCloud, transform);
-        log_ << ".. point cloud transformed.\n";
-
-        pcl::PLYWriter plyWriter;
-
-        log_ << '\n';
-        log_ << "Saving point cloud file to \'" << outputPointCloudFilename_ << "\'...\n";
-        //pcl::io::savePLYFileASCII(outputPointCloudFilename_.c_str(), *pointCloud.get());
-        plyWriter.write(outputPointCloudFilename_.c_str(), *pointCloud.get(), false, false);
-        log_ << ".. point cloud file saved.\n";
-    }
-
-    if(exportCoordinateFile_)
-    {
-        log_ << '\n';
-        log_ << "Saving georeferenced camera positions to ";
-        log_ << outputCoordFilename_;
-        log_<< "\n";
-        std::ofstream coordStream(outputCoordFilename_.c_str());
-        coordStream << georefSystem_.system_ <<std::endl;
-        coordStream << static_cast<int>(georefSystem_.eastingOffset_) << " " << static_cast<int>(georefSystem_.northingOffset_) << std::endl;
-        for(size_t cameraIndex = 0; cameraIndex < cameras_.size(); ++cameraIndex)
-        {
-            Vec3 globalCameraPosition = (transFinal.transform_)*(cameras_[cameraIndex].getPos());
-            coordStream << globalCameraPosition.x_ << " " << globalCameraPosition.y_ << " " << globalCameraPosition.z_ << std::endl;
-        }
-        coordStream.close();
-        log_ << "...coordinate file saved.\n";
-    }
-
-    if(exportGeorefSystem_)
-    {
-        printGeorefSystem();
-    }
+    
+    // The transform used to transform model into the georeferenced system.
+    performFinalTransform(transFinal.transform_, mesh, meshCloud, true);
 }
 
 void Georef::createGeoreferencedModelFromGCPData()
@@ -997,7 +973,7 @@ void Georef::createGeoreferencedModelFromGCPData()
 void Georef::createGeoreferencedModelFromExifData()
 {
     readCameras();
-    
+
     // Read coords from coord file generated by extract_utm tool
     std::ifstream coordStream(inputCoordFilename_.c_str());
     if (!coordStream.good())
@@ -1040,7 +1016,15 @@ void Georef::createGeoreferencedModelFromExifData()
     {
         throw GeorefException("Not enough cameras in \'" + inputCoordFilename_ + "\' coord file.\n");
     }
-    
+
+    // Remove invalid cameras
+    std::vector<GeorefCamera> goodCameras;
+    for (size_t i = 0; i < cameras_.size(); i++){
+        if (cameras_[i].isValid()) goodCameras.push_back(GeorefCamera(cameras_[i]));
+    }
+    cameras_.clear();
+    cameras_ = goodCameras;
+
     // The optimal camera triplet.
     size_t cam0, cam1, cam2;
     
@@ -1053,90 +1037,76 @@ void Georef::createGeoreferencedModelFromExifData()
     FindTransform transFinal;
     transFinal.findTransform(cameras_[cam0].getPos(), cameras_[cam1].getPos(), cameras_[cam2].getPos(),
                              cameras_[cam0].getReferencedPos(), cameras_[cam1].getReferencedPos(), cameras_[cam2].getReferencedPos());
+    
     log_ << "Final transform:\n";
     log_ << transFinal.transform_ << '\n';
-    
-    // The tranform used to move the chosen area into the ortho photo.
-    Eigen::Transform<float, 3, Eigen::Affine> transform;
-    
-    transform(0, 0) = static_cast<float>(transFinal.transform_.r1c1_);    transform(1, 0) = static_cast<float>(transFinal.transform_.r2c1_);
-    transform(2, 0) = static_cast<float>(transFinal.transform_.r3c1_);    transform(3, 0) = static_cast<float>(transFinal.transform_.r4c1_);
-    
-    transform(0, 1) = static_cast<float>(transFinal.transform_.r1c2_);    transform(1, 1) = static_cast<float>(transFinal.transform_.r2c2_);
-    transform(2, 1) = static_cast<float>(transFinal.transform_.r3c2_);    transform(3, 1) = static_cast<float>(transFinal.transform_.r4c2_);
-    
-    transform(0, 2) = static_cast<float>(transFinal.transform_.r1c3_);    transform(1, 2) = static_cast<float>(transFinal.transform_.r2c3_);
-    transform(2, 2) = static_cast<float>(transFinal.transform_.r3c3_);    transform(3, 2) = static_cast<float>(transFinal.transform_.r4c3_);
-    
-    transform(0, 3) = static_cast<float>(transFinal.transform_.r1c4_);    transform(1, 3) = static_cast<float>(transFinal.transform_.r2c4_);
-    transform(2, 3) = static_cast<float>(transFinal.transform_.r3c4_);    transform(3, 3) = static_cast<float>(transFinal.transform_.r4c4_);
     
     log_ << '\n';
     log_ << "Reading mesh file...\n";
     pcl::TextureMesh mesh;
     loadObjFile(inputObjFilename_, mesh);
     log_ << ".. mesh file read.\n";
-    
+
     // Contains the vertices of the mesh.
     pcl::PointCloud<pcl::PointXYZ>::Ptr meshCloud (new pcl::PointCloud<pcl::PointXYZ>);
     pcl::fromPCLPointCloud2 (mesh.cloud, *meshCloud);
-    
+
+    performFinalTransform(transFinal.transform_, mesh, meshCloud, true);
+}
+
+void Georef::createGeoreferencedModelFromSFM()
+{
+    // Read coordinate system from coord file generated by extract_utm tool
+    // UTM coordinates from OpenSfM transform
+    std::ifstream coordStream(inputCoordFilename_.c_str());
+    if (!coordStream.good()) throw GeorefException("Failed opening coordinate file " + inputCoordFilename_ + " for reading." + '\n');
+    std::getline(coordStream, georefSystem_.system_);
+    coordStream.close();
+
+    Mat4 transform;
+    // get transform in correct format
+    // Read elements from transform file generated by opensfm
+    std::ifstream transStream(transformFilename_.c_str());
+    if (!transStream.good())
+    {
+        throw GeorefException("Failed opening coordinate file " + transformFilename_ + " for reading. " + '\n');
+    }
+
+    std::string transString;
+    {
+        std::getline(transStream, transString);
+        std::stringstream l1(transString);
+        l1 >> transform.r1c1_ >> transform.r1c2_ >> transform.r1c3_ >> transform.r1c4_;
+
+        std::getline(transStream, transString);
+        std::stringstream l2(transString);
+        l2 >> transform.r2c1_ >> transform.r2c2_ >> transform.r2c3_ >> transform.r2c4_;
+
+        std::getline(transStream, transString);
+        std::stringstream l3(transString);
+        l3 >> transform.r3c1_ >> transform.r3c2_ >> transform.r3c3_ >> transform.r3c4_;
+
+        std::getline(transStream, transString);
+        std::stringstream l4(transString);
+        l4 >> transform.r4c1_ >> transform.r4c2_ >> transform.r4c3_ >> transform.r4c4_;
+    }
+
+    georefSystem_.eastingOffset_ = transform.r1c4_;
+    georefSystem_.northingOffset_ = transform.r2c4_;
+
+    // load mesh
     log_ << '\n';
-    log_ << "Applying transform to mesh...\n";
-    // Move the mesh into position.
-    pcl::transformPointCloud(*meshCloud, *meshCloud, transform);
-    log_ << ".. mesh transformed.\n";
-    
-    // Update the mesh.
-    pcl::toPCLPointCloud2 (*meshCloud, mesh.cloud);
-    
-    // Iterate over each part of the mesh (one per material), to make texture file paths relative the .mtl file.
-    for(size_t t = 0; t < mesh.tex_materials.size(); ++t)
-    {
-        // The material of the current submesh.
-        pcl::TexMaterial& material = mesh.tex_materials[t];
-        
-        size_t find = material.tex_file.find_last_of("/\\");
-        if(std::string::npos != find)
-        {
-            material.tex_file = material.tex_file.substr(find + 1);
-        }
-    }
-    
-    log_ << '\n';
-    log_ << "Saving mesh file to \'" << outputObjFilename_ << "\'...\n";
-    saveOBJFile(outputObjFilename_, mesh, 8);
-    log_ << ".. mesh file saved.\n";
-    
-    if(georeferencePointCloud_)
-    {
-        //pcl::PointCloud2<pcl::PointNormal>::Ptr pointCloud;
-        pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr pointCloud(new pcl::PointCloud<pcl::PointXYZRGBNormal>());
-        if(pcl::io::loadPLYFile<pcl::PointXYZRGBNormal> (inputPointCloudFilename_.c_str(), *pointCloud.get()) == -1) {
-            throw GeorefException("Error when reading point cloud:\n" + inputPointCloudFilename_ + "\n");
-        }
-        else
-        {
-            log_ << "Successfully loaded " << pointCloud->size() << " points with corresponding normals from file.\n";
-        }
-        log_ << '\n';
-        log_ << "Applying transform to point cloud...\n";
-        pcl::transformPointCloud(*pointCloud, *pointCloud, transform);
-        log_ << ".. point cloud transformed.\n";
+    log_ << "Reading mesh file...\n";
+    pcl::TextureMesh mesh;
+    loadObjFile(inputObjFilename_, mesh);
+    log_ << ".. mesh file read.\n";
 
-        pcl::PLYWriter plyWriter;
+    // Contains the vertices of the mesh.
+    pcl::PointCloud<pcl::PointXYZ>::Ptr meshCloud (new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::fromPCLPointCloud2 (mesh.cloud, *meshCloud);
 
-        log_ << '\n';
-        log_ << "Saving point cloud file to \'" << outputPointCloudFilename_ << "\'...\n";
-        //pcl::io::savePLYFileASCII(outputPointCloudFilename_.c_str(), *pointCloud.get());
-        plyWriter.write(outputPointCloudFilename_.c_str(), *pointCloud.get(), false, false);
-        log_ << ".. point cloud file saved.\n";
-    }
-
-    if(exportGeorefSystem_)
-    {
-        printGeorefSystem();
-    }
+    // OpenSfM transform has UTM offsets embedded in the translation
+    performFinalTransform(transform, mesh, meshCloud, false);
 }
 
 void Georef::chooseBestGCPTriplet(size_t &gcp0, size_t &gcp1, size_t &gcp2)
@@ -1310,6 +1280,191 @@ void Georef::printGeorefSystem()
     log_ << "... georeference system saved.\n";
 }
 
+template <typename Scalar>
+void Georef::printFinalTransform(const Eigen::Transform<Scalar, 3, Eigen::Affine> &transform)
+{
+    if(outputObjFilename_.empty())
+    {
+        throw GeorefException("Output file path empty!.");
+    }
+    
+    std::string tmp = outputObjFilename_;
+    size_t findPos = tmp.find_last_of(".");
+    
+    if(std::string::npos == findPos)
+    {
+        throw GeorefException("Tried to generate default ouptut file, could not find .obj in the output file:\n\'"+outputObjFilename_+"\'");
+    }
+    
+    log_ << '\n';
+    log_ << "Saving final transform file to \'" << finalTransformFile_ << "\'...\n";
+    std::ofstream transformStream(finalTransformFile_.c_str());
+    transformStream  << setiosflags(ios::fixed) << setprecision(7) << 
+      "[ " << transform(0, 0) << ",\t" << transform(0, 1) << ",\t" << transform(0, 2) << ",\t" << transform(0, 3) << " ]" << std::endl << 
+      "[ " << transform(1, 0) << ",\t" << transform(1, 1) << ",\t" << transform(1, 2) << ",\t" << transform(1, 3) << " ]" << std::endl << 
+      "[ " << transform(2, 0) << ",\t" << transform(2, 1) << ",\t" << transform(2, 2) << ",\t" << transform(2, 3) << " ]" << std::endl << 
+      "[ " << transform(3, 0) << ",\t" << transform(3, 1) << ",\t" << transform(3, 2) << ",\t" << transform(3, 3) << " ]";
+    transformStream.close();
+    log_ << "... final transform saved.\n";
+}
+
+
+void Georef::performFinalTransform(Mat4 &transMat, pcl::TextureMesh &mesh, pcl::PointCloud<pcl::PointXYZ>::Ptr &meshCloud, bool addUTM)
+{
+    Eigen::Transform<double, 3, Eigen::Affine> transform;
+
+    transform(0, 0) = static_cast<double>(transMat.r1c1_);
+    transform(1, 0) = static_cast<double>(transMat.r2c1_);
+    transform(2, 0) = static_cast<double>(transMat.r3c1_);
+    transform(3, 0) = static_cast<double>(transMat.r4c1_);
+
+    transform(0, 1) = static_cast<double>(transMat.r1c2_);
+    transform(1, 1) = static_cast<double>(transMat.r2c2_);
+    transform(2, 1) = static_cast<double>(transMat.r3c2_);
+    transform(3, 1) = static_cast<double>(transMat.r4c2_);
+
+    transform(0, 2) = static_cast<double>(transMat.r1c3_);
+    transform(1, 2) = static_cast<double>(transMat.r2c3_);
+    transform(2, 2) = static_cast<double>(transMat.r3c3_);
+    transform(3, 2) = static_cast<double>(transMat.r4c3_);
+
+    double transX = static_cast<double>(transMat.r1c4_);
+    double transY = static_cast<double>(transMat.r2c4_);
+
+    if (addUTM){
+        transform(0, 3) = transX;
+        transform(1, 3) = transY;
+    }else{
+        transform(0, 3) = 0.0f;
+        transform(1, 3) = 0.0f;
+    }
+    transform(2, 3) = static_cast<double>(transMat.r3c4_);
+    transform(3, 3) = static_cast<double>(transMat.r4c4_);
+
+    log_ << '\n';
+    log_ << "Applying transform to mesh...\n";
+    // Move the mesh into position.
+    pcl::transformPointCloud(*meshCloud, *meshCloud, transform);
+    log_ << ".. mesh transformed.\n";
+    
+    // Update the mesh.
+    pcl::toPCLPointCloud2 (*meshCloud, mesh.cloud);
+
+    // Iterate over each part of the mesh (one per material), to make texture file paths relative the .mtl file.
+    for(size_t t = 0; t < mesh.tex_materials.size(); ++t)
+    {
+        // The material of the current submesh.
+        pcl::TexMaterial& material = mesh.tex_materials[t];
+
+        size_t find = material.tex_file.find_last_of("/\\");
+        if(std::string::npos != find)
+        {
+            material.tex_file = material.tex_file.substr(find + 1);
+        }
+    }
+
+    log_ << '\n';
+    if (saveOBJFile(outputObjFilename_, mesh, 8) == -1)
+    {
+        throw GeorefException("Error when saving model:\n" + outputObjFilename_ + "\n");
+    }
+    else
+    {
+        log_ << "Successfully saved model.\n";
+    }
+
+    // GCPs and EXIF modes includes a translation
+    // but not UTM offsets. We want our point cloud
+    // and odm_georeferencing_model_geo.txt file 
+    // to include the UTM offset.
+    // OpenSfM already has UTM offsets
+    if (addUTM){
+        transform(0, 3) = georefSystem_.eastingOffset_ + transX;
+        transform(1, 3) = georefSystem_.northingOffset_ + transY;
+    }else{
+        transform(0, 3) = transX;
+        transform(1, 3) = transY;
+    }
+
+    printFinalTransform(transform);
+
+    if(georeferencePointCloud_)
+    {
+        Georef::transformPointCloud(inputPointCloudFilename_.c_str(), transform, outputPointCloudFilename_.c_str());
+    }
+
+    if(exportCoordinateFile_)
+    {
+        log_ << '\n';
+        log_ << "Saving georeferenced camera positions to ";
+        log_ << outputCoordFilename_;
+        log_<< "\n";
+        std::ofstream coordStream(outputCoordFilename_.c_str());
+        coordStream << georefSystem_.system_ <<std::endl;
+        coordStream << static_cast<int>(georefSystem_.eastingOffset_) << " " << static_cast<int>(georefSystem_.northingOffset_) << std::endl;
+        for(size_t cameraIndex = 0; cameraIndex < cameras_.size(); ++cameraIndex)
+        {
+            Vec3 globalCameraPosition = (transMat)*(cameras_[cameraIndex].getPos());
+            coordStream << globalCameraPosition.x_ << " " << globalCameraPosition.y_ << " " << globalCameraPosition.z_ << std::endl;
+        }
+        coordStream.close();
+        log_ << "...coordinate file saved.\n";
+    }
+
+    if(exportGeorefSystem_)
+    {
+        printGeorefSystem();
+    }
+}
+
+template <typename Scalar>
+void Georef::transformPointCloud(const char *inputFile, const Eigen::Transform<Scalar, 3, Eigen::Affine> &transform, const char *outputFile){
+    try{
+        log_ << "Transforming point cloud...\n";
+
+        // PDAL pipeline: ply reader --> matrix transform --> las writer.
+
+        pdal::Options inPlyOpts;
+        inPlyOpts.add("filename", inputFile);
+
+        pdal::PointTable table;
+        pdal::PlyReader plyReader;
+        plyReader.setOptions(inPlyOpts);
+
+        pdal::MatrixTransformFilter<Scalar> transformFilter(transform);
+        transformFilter.setInput(plyReader);
+
+        pdal::Options outLasOpts;
+        outLasOpts.add("filename", outputFile);
+
+        std::string s(outputFile);
+        if (s.substr(s.find_last_of(".") + 1) == "laz"){
+            outLasOpts.add("compression", "laszip");
+        }
+
+        outLasOpts.add("offset_x", georefSystem_.eastingOffset_);
+        outLasOpts.add("offset_y", georefSystem_.northingOffset_);
+        outLasOpts.add("offset_z", 0);
+
+        if (!outputPointCloudSrs_.empty()){
+            outLasOpts.add("a_srs", outputPointCloudSrs_);
+        }else{
+            log_ << "WARNING! A point cloud will be generated without a SRS, because -outputPointCloudSrs was not specified!\n";
+        }
+
+        pdal::LasWriter lasWriter;
+        lasWriter.setOptions(outLasOpts);
+        lasWriter.setInput(transformFilter);
+        lasWriter.prepare(table);
+        lasWriter.execute(table);
+
+        log_ << "Point cloud file saved.\n";
+    }
+    catch (const std::exception & e)
+    {
+        throw GeorefException("Error while loading point cloud: " + std::string(e.what()));
+    }
+}
 
 bool Georef::loadObjFile(std::string inputFile, pcl::TextureMesh &mesh)
 {
@@ -1359,8 +1514,8 @@ bool Georef::loadObjFile(std::string inputFile, pcl::TextureMesh &mesh)
     std::size_t f_idx = 0;
     std::string line;
     std::vector<std::string> st;
-    std::vector<Eigen::Vector2f> coordinates;
-    std::vector<Eigen::Vector2f> allTexCoords;
+    std::vector<Eigen::Vector2f, Eigen::aligned_allocator<Eigen::Vector2f> > coordinates;
+    std::vector<Eigen::Vector2f, Eigen::aligned_allocator<Eigen::Vector2f> > allTexCoords;
 
     std::map<int, int> f2vt;
 
@@ -1499,7 +1654,7 @@ bool Georef::loadObjFile(std::string inputFile, pcl::TextureMesh &mesh)
 
     if (vt_idx != v_idx)
     {
-        std::vector<Eigen::Vector2f> texcoordinates = std::vector<Eigen::Vector2f>(0);
+        std::vector<Eigen::Vector2f, Eigen::aligned_allocator<Eigen::Vector2f> > texcoordinates = std::vector<Eigen::Vector2f, Eigen::aligned_allocator<Eigen::Vector2f> >(0);
         texcoordinates.reserve(3*f_idx);
 
         for (size_t faceIndex = 0; faceIndex < f_idx; ++faceIndex)
@@ -1516,7 +1671,7 @@ bool Georef::loadObjFile(std::string inputFile, pcl::TextureMesh &mesh)
     }
 
     fs.close();
-    return (0);
+    return true;
 }
 
 bool Georef::readHeader (const std::string &file_name, pcl::PCLPointCloud2 &cloud,

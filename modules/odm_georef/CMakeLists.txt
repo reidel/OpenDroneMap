@@ -9,11 +9,11 @@ find_library(PROJ4_LIBRARY "libproj.so" PATHS "/usr/lib" "/usr/lib/x86_64-linux-
 #set(PROJ4_LIBRARY "/usr/lib/x86_64-linux-gnu/libproj.so" CACHE "PROJ4_LIBRARY" "Path to the proj4 library directory")
 
 # Add compiler options.
-add_definitions(-Wall -Wextra -Wconversion -pedantic)
-#add_definitions(-pedantic -pedantic-errors -Wall -Wextra -Werror -Wfatal-errors -Wabi -Wctor-dtor-privacy -Wnon-virtual-dtor -Wreorder -Weffc++ -Wstrict-null-sentinel -Wnon-template-friend -Wold-style-cast -Woverloaded-virtual -Wpmf-conversions -Wsign-promo -Waddress -Warray-bounds -Wattributes -Wbuiltin-macro-redefined -Wc++0x-compat -Wcast-align -Wcast-qual -Wchar-subscripts -Wclobbered -Wcomment -Wconversion -Wcoverage-mismatch -Wdeprecated -Wdeprecated-declarations -Wdisabled-optimization -Wdiv-by-zero -Wempty-body -Wenum-compare -Wendif-labels -Wfatal-errors -Wfloat-equal -Wformat -Wformat=2 -Wformat-contains-nul -Wformat-extra-args -Wformat-nonliteral -Wformat-security -Wformat-y2k -Wignored-qualifiers -Winit-self -Wint-to-pointer-cast -Winvalid-offsetof -Winvalid-pch -Wlogical-op -Wmain -Wvariadic-macros -Wmissing-braces -Wmissing-field-initializers -Wmissing-include-dirs -Wmissing-noreturn -Wvla -Wmultichar -Wfatal-errors -Wnonnull -Woverflow -Woverlength-strings -Wpacked -Wpacked-bitfield-compat -Wparentheses -Wpointer-arith -Wredundant-decls -Wsequence-point -Wshadow -Wsign-compare -Wsign-conversion -Wstack-protector -Wstrict-overflow=5 -Wswitch -Wswitch-enum -Wsync-nand -Wvolatile-register-var -Wtrigraphs -Wtype-limits -Wuninitialized -Wunknown-pragmas -Wwrite-strings -Wpragmas -Wunreachable-code -Wunused -Wunused-function -Wunused-label -Wunused-parameter -Wunused-value -Wunused-variable -Wno-return-type)
+add_definitions(-Wall -Wextra -Wconversion -pedantic -std=c++11)
 
 # Find pcl at the location specified by PCL_DIR
-find_package(PCL 1.7 HINTS "${PCL_DIR}/share/pcl-1.7")
+find_package(VTK 6.0 REQUIRED)
+find_package(PCL 1.8 HINTS "${PCL_DIR}/share/pcl-1.8")
 
 # Find OpenCV at the default location
 find_package(OpenCV HINTS "${OPENCV_DIR}" REQUIRED)
@@ -26,6 +26,13 @@ set(OpenCV_LIBS opencv_core opencv_imgproc opencv_highgui)
 include_directories(${PCL_ROOT}/include/pcl-${PCL_VERSION_MAJOR}.${PCL_VERSION_MINOR})
 include_directories(${EIGEN_ROOT})
 
+# PDAL and jsoncpp
+find_package(PDAL REQUIRED CONFIG)
+include_directories(${PDAL_INCLUDE_DIRS})
+include_directories("${PROJECT_SOURCE_DIR}/../../SuperBuild/src/pdal/vendor/jsoncpp/dist")
+link_directories(${PDAL_LIBRARY_DIRS})
+add_definitions(${PDAL_DEFINITIONS})
+
 # Add source directory
 aux_source_directory("./src" SRC_LIST)
 
@@ -33,4 +40,4 @@ aux_source_directory("./src" SRC_LIST)
 add_executable(${PROJECT_NAME} ${SRC_LIST})
 
 # Link
-target_link_libraries(${PROJECT_NAME} ${PCL_COMMON_LIBRARIES} ${PCL_IO_LIBRARIES} ${PCL_SURFACE_LIBRARIES} ${PROJ4_LIBRARY} ${OpenCV_LIBS})
+target_link_libraries(${PROJECT_NAME} ${PCL_COMMON_LIBRARIES} ${PCL_IO_LIBRARIES} ${PCL_SURFACE_LIBRARIES} ${PROJ4_LIBRARY} ${OpenCV_LIBS} jsoncpp ${PDAL_LIBRARIES})

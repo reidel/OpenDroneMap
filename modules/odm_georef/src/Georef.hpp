@@ -8,6 +8,7 @@
 // PCL
 #include <pcl/common/eigen.h>
 #include <pcl/common/common.h>
+#include <pcl/io/ply_io.h>
 // Modified PCL
 #include "modifiedPclFunctions.hpp"
 
@@ -16,6 +17,9 @@
 
 // Transformation
 #include "FindTransform.hpp"
+
+// PDAL matrix transform filter
+#include "MatrixTransformFilter.hpp"
 
 /*!
  * \brief   The GeorefSystem struct is used to store information about a georeference system.
@@ -46,10 +50,11 @@ struct GeorefGCP
 
     size_t cameraIndex_;    /**< The index to the corresponding camera for the image. **/
 
-    int pixelX_;            /**< The pixels x-position for the GCP in the corresponding image **/
-    int pixelY_;            /**< The pixels y-position for the GCP in the corresponding image **/
+    double pixelX_;            /**< The pixels x-position for the GCP in the corresponding image **/
+    double pixelY_;            /**< The pixels y-position for the GCP in the corresponding image **/
 
     std::string image_;     /**< The corresponding image for the GCP **/
+    std::string idgcp_;     /**< The corresponding identification for the GCP **/
 
     GeorefGCP();
     ~GeorefGCP();
@@ -95,6 +100,11 @@ struct GeorefCamera
      * \brief getReferencedPos     Get the georeferenced position of the camera.
      */
     Vec3 getReferencedPos();
+
+    /*!
+     * \brief isValid     Whether this camera is valid based on its parameters.
+     */
+    bool isValid();
     
     double focalLength_;            /**< The focal length of the camera. */
     double k1_;                     /**< The k1 lens distortion parameter. **/
@@ -228,6 +238,13 @@ private:
     void printGeorefSystem();
     
     /*!
+      * \brief printFinalTransform      Prints a file containing the final transform, next to the output file.
+      **/
+    template <typename Scalar>
+    void printFinalTransform(const Eigen::Transform<Scalar, 3, Eigen::Affine> &transform);
+
+    
+    /*!
       * \brief Loads a model from an .obj file (replacement for the pcl obj loader).
       *
       * \param inputFile Path to the .obj file.
@@ -248,23 +265,28 @@ private:
     Logger          log_;                       /**< Logging object. */
     std::string     logFile_;                   /**< The path to the output log file. */
     
+    std::string     finalTransformFile_;        /**< The path to the file for the final transform. */
+    
     std::string     bundleFilename_;            /**< The path to the cameras bundle file. **/
     std::string     inputCoordFilename_;        /**< The path to the cameras exif gps positions file. **/
     std::string     outputCoordFilename_;       /**< The path to the cameras georeferenced gps positions file. **/
     std::string     gcpFilename_;               /**< The path to the GCP file **/
+    std::string     transformFilename_;         /**< The path to the input transform file **/
     std::string     imagesListPath_;            /**< Path to the image list. **/
     std::string     imagesLocation_;            /**< The folder containing the images in the image list. **/
     std::string     inputObjFilename_;          /**< The path to the input mesh obj file. **/
     std::string     outputObjFilename_;         /**< The path to the output mesh obj file. **/
     std::string     inputPointCloudFilename_;   /**< The path to the input point cloud file. **/
     std::string     outputPointCloudFilename_;  /**< The path to the output point cloud file. **/
-    std::string     georefFilename_;      /**< The path to the output offset file. **/
+    std::string     georefFilename_;            /**< The path to the output offset file. **/
+    std::string     outputPointCloudSrs_;                       /**< The spatial reference system of the point cloud file to be written. Can be an EPSG string (e.g. “EPSG:26910”) or a WKT string. **/
 
     bool            georeferencePointCloud_;
     bool            exportCoordinateFile_;
     bool            exportGeorefSystem_;
     bool            useGCP_;                    /**< Check if GCP-file is present and use this to georeference the model. **/
-    double          bundleResizedTo_;           /**< The size used in the previous steps to calculate the camera focal_length. */
+    bool            useTransform_;
+    // double          bundleResizedTo_;           /**< The size used in the previous steps to calculate the camera focal_length. */
 
     std::vector<GeorefCamera> cameras_;         /**< A vector of all cameras. **/
     std::vector<GeorefGCP> gcps_;               /**< A vector of all GCPs. **/
@@ -275,6 +297,12 @@ private:
     bool            multiMaterial_;     /**< True if the mesh has multiple materials. **/
 
     std::vector<pcl::MTLReader> companions_; /**< Materials (used by loadOBJFile). **/
+    void performFinalTransform(Mat4 &transMat, pcl::TextureMesh &mesh, pcl::PointCloud<pcl::PointXYZ>::Ptr &meshCloud, bool addUTM);
+    
+    template <typename Scalar>
+    void transformPointCloud(const char *inputFile, const Eigen::Transform<Scalar, 3, Eigen::Affine> &transform, const char *outputFile);
+    
+    void createGeoreferencedModelFromSFM();
 };
 
 /*!

@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.1)
 
 project(ODM-SuperBuild)
 
+if (NOT CMAKE_BUILD_TYPE)
+    message(STATUS "No build type selected, default to Release")
+    set(CMAKE_BUILD_TYPE "Release")
+endif()
+
 # Setup SuperBuild root location
 set(SB_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -66,7 +71,7 @@ SETUP_EXTERNAL_PROJECT(OpenCV ${ODM_OpenCV_Version} ${ODM_BUILD_OpenCV})
 # ---------------------------------------------------------------------------------------------
 # Point Cloud Library (PCL)
 #
-set(ODM_PCL_Version 1.7.2)
+set(ODM_PCL_Version 1.8.0)
 option(ODM_BUILD_PCL "Force to build PCL library" OFF)
 
 SETUP_EXTERNAL_PROJECT(PCL ${ODM_PCL_Version} ${ODM_BUILD_PCL})
@@ -91,28 +96,21 @@ SETUP_EXTERNAL_PROJECT(Ceres ${ODM_Ceres_Version} ${ODM_BUILD_Ceres})
 
 
 # ---------------------------------------------------------------------------------------------
-# CGAL
+# Hexer
 #
-set(ODM_CGAL_Version 4.9)
-option(ODM_BUILD_CGAL "Force to build CGAL library" OFF)
-
-SETUP_EXTERNAL_PROJECT(CGAL ${ODM_CGAL_Version} ${ODM_BUILD_CGAL})
-
+SETUP_EXTERNAL_PROJECT(Hexer 1.4 ON)
 
 # ---------------------------------------------------------------------------------------------
 # Open Geometric Vision (OpenGV)
 # Open Structure from Motion (OpenSfM)
-# Clustering Views for Multi-view Stereo (CMVS)
-# Catkin
-# Ecto
 #
 
 set(custom_libs OpenGV
 				OpenSfM
-				CMVS
-				Catkin
-				Ecto
+				LASzip
+                Zstd
 				PDAL
+                Entwine
 				MvsTexturing
 )
 
@@ -127,3 +125,59 @@ foreach(lib ${custom_libs})
 	SETUP_EXTERNAL_PROJECT_CUSTOM(${lib})
 endforeach()
 
+## Add mve Build
+
+externalproject_add(mve
+    GIT_REPOSITORY  https://github.com/OpenDroneMap/mve.git
+    GIT_TAG         099
+    UPDATE_COMMAND  ""
+    SOURCE_DIR      ${SB_SOURCE_DIR}/elibs/mve
+    CONFIGURE_COMMAND ""
+    BUILD_IN_SOURCE 1
+    BUILD_COMMAND   make
+    INSTALL_COMMAND ""
+)
+
+externalproject_add(poissonrecon
+    GIT_REPOSITORY    https://github.com/mkazhdan/PoissonRecon.git
+    GIT_TAG           ce5005ae3094d902d551a65a8b3131e06f45e7cf
+    SOURCE_DIR        ${SB_SOURCE_DIR}/PoissonRecon
+    UPDATE_COMMAND    ""
+    CONFIGURE_COMMAND ""
+    BUILD_IN_SOURCE 1
+    BUILD_COMMAND     make poissonrecon
+    INSTALL_COMMAND   ""
+)
+
+externalproject_add(dem2mesh
+    GIT_REPOSITORY    https://github.com/OpenDroneMap/dem2mesh.git
+    GIT_TAG           master
+    SOURCE_DIR        ${SB_SOURCE_DIR}/dem2mesh
+    UPDATE_COMMAND    ""
+    BUILD_IN_SOURCE 1
+    BUILD_COMMAND     make
+    INSTALL_COMMAND   ""
+)
+
+externalproject_add(dem2points
+    GIT_REPOSITORY    https://github.com/OpenDroneMap/dem2points.git
+    GIT_TAG           master
+    SOURCE_DIR        ${SB_SOURCE_DIR}/dem2points
+    UPDATE_COMMAND    ""
+    BUILD_IN_SOURCE 1
+    BUILD_COMMAND     make
+    INSTALL_COMMAND   ""
+)
+
+externalproject_add(lastools
+    GIT_REPOSITORY    https://github.com/LAStools/LAStools.git
+    GIT_TAG           2ef44281645999ec7217facec84a5913bbbbe165
+    SOURCE_DIR        ${SB_SOURCE_DIR}/lastools
+    CONFIGURE_COMMAND ""
+    CMAKE_COMMAND     ""
+    CMAKE_GENERATOR   ""
+    UPDATE_COMMAND    ""
+    BUILD_IN_SOURCE 1
+    BUILD_COMMAND     make -C LASlib -j$(nproc) CXXFLAGS='-std=c++11' && make -C src -j$(nproc) CXXFLAGS='-std=c++11' lasmerge
+    INSTALL_COMMAND   mv ${SB_SOURCE_DIR}/lastools/bin/lasmerge ${SB_INSTALL_DIR}/bin
+)

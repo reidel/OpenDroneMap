@@ -1,384 +1,205 @@
 import cv2
-import pyexiv2
 import re
-from fractions import Fraction
-from opensfm.exif import sensor_string
+import os
+from opendm import get_image_size
+from opendm import location
+from opendm.gcp import GCPFile
+from pyproj import CRS
+import xmltodict as x2d
+from six import string_types
 
 import log
 import io
 import system
 import context
+import logging
+from opendm.progress import progressbc
+from opendm.photo import ODM_Photo
 
 
-class ODM_Photo:
-    """   ODMPhoto - a class for ODMPhotos
-    """
-
-    def __init__(self, path_file, force_focal, force_ccd):
-        #  general purpose
-        self.path_file = path_file
-        self.filename = io.extract_file_from_path_file(path_file)
-        # useful attibutes
-        self.width = None
-        self.height = None
-        self.ccd_width = None
-        self.focal_length = None
-        self.focal_length_px = None
-        # other attributes
-        self.camera_make = ''
-        self.camera_model = ''
-        self.make_model = ''
-        # parse values from metadata
-        self.parse_pyexiv2_values(self.path_file, force_focal, force_ccd)
-        # compute focal length into pixels
-        self.update_focal()
-
-        # print log message
-        log.ODM_DEBUG('Loaded %s | camera: %s | dimensions: %s x %s | focal: %s | ccd: %s' %
-                      (self.filename, self.make_model, self.width, self.height, self.focal_length, self.ccd_width))
-
-    def update_focal(self):
-        # compute focal length in pixels
-        if self.focal_length and self.ccd_width:
-            # take width or height as reference
-            if self.width > self.height:
-                # f(px) = w(px) * f(mm) / ccd(mm)
-                self.focal_length_px = \
-                    self.width * (self.focal_length / self.ccd_width)
-            else:
-                # f(px) = h(px) * f(mm) / ccd(mm)
-                self.focal_length_px = \
-                    self.height * (self.focal_length / self.ccd_width)
-
-    def parse_pyexiv2_values(self, _path_file, _force_focal, _force_ccd):
-        # read image metadata
-        metadata = pyexiv2.ImageMetadata(_path_file)
-        metadata.read()
-        # loop over image tags
-        for key in metadata:
-            # try/catch tag value due to weird bug in pyexiv2 
-            # ValueError: invalid literal for int() with base 10: ''
-            try:
-                val = metadata[key].value
-                # parse tag names
-                if key == 'Exif.Image.Make':
-                    self.camera_make = val
-                elif key == 'Exif.Image.Model':
-                    self.camera_model = val
-                elif key == 'Exif.Photo.FocalLength':
-                    self.focal_length = float(val)
-            except (pyexiv2.ExifValueError, ValueError) as e:
-                pass
-            except NotImplementedError as e:
-                pass
-
-        if self.camera_make and self.camera_model:
-            self.make_model = sensor_string(self.camera_make, self.camera_model)
-
-        # needed to do that since sometimes metadata contains wrong data
-        img = cv2.imread(_path_file)
-        self.width = img.shape[1]
-        self.height = img.shape[0]
-
-        # force focal and ccd_width with user parameter
-        if _force_focal:
-            self.focal_length = _force_focal
-        if _force_ccd:
-            self.ccd_width = _force_ccd
-
-        # find ccd_width from file if needed
-        if self.ccd_width is None and self.camera_model is not None:
-            # load ccd_widths from file
-            ccd_widths = system.get_ccd_widths()
-            # search ccd by camera model
-            key = [x for x in ccd_widths.keys() if self.make_model in x]
-            # convert to float if found
-            if key:
-                self.ccd_width = float(ccd_widths[key[0]])
-            else:
-                log.ODM_WARNING('Could not find ccd_width in file. Use --force-ccd or edit the sensor_data.json '
-                                'file to manually input ccd width')
-
-
-# TODO: finish this class
 class ODM_Reconstruction(object):
-    """docstring for ODMReconstruction"""
+    def __init__(self, photos):
+        self.photos = photos
+        self.georef = None
+        self.gcp = None
+        self.multi_camera = self.detect_multi_camera()
 
-    def __init__(self, arg):
-        super(ODMReconstruction, self).__init__()
-        self.arg = arg
+    def detect_multi_camera(self):
+        """
+        Looks at the reconstruction photos and determines if this
+        is a single or multi-camera setup.
+        """
+        band_photos = {}
+        band_indexes = {}
 
+        for p in self.photos:
+            if not p.band_name in band_photos:
+                band_photos[p.band_name] = []
+            if not p.band_name in band_indexes:
+                band_indexes[p.band_name] = p.band_index
 
-class ODM_GCPoint(object):
-    """docstring for ODMPoint"""
+            band_photos[p.band_name].append(p)
+            
+        bands_count = len(band_photos)
+        if bands_count >= 2 and bands_count <= 8:
+            # Validate that all bands have the same number of images,
+            # otherwise this is not a multi-camera setup
+            img_per_band = len(band_photos[p.band_name])
+            for band in band_photos:
+                if len(band_photos[band]) != img_per_band:
+                    log.ODM_ERROR("Multi-camera setup detected, but band \"%s\" (identified from \"%s\") has only %s images (instead of %s), perhaps images are missing or are corrupted. Please include all necessary files to process all bands and try again." % (band, band_photos[band][0].filename, len(band_photos[band]), img_per_band))
+                    raise RuntimeError("Invalid multi-camera images")
+            
+            mc = []
+            for band_name in band_indexes:
+                mc.append({'name': band_name, 'photos': band_photos[band_name]})
+            
+            # Sort by band index
+            mc.sort(key=lambda x: band_indexes[x['name']])
 
-    def __init__(self, x, y, z):
-        self.x = x
-        self.y = y
-        self.z = z
+            return mc
 
+        return None
+
+    def is_georeferenced(self):
+        return self.georef is not None
+
+    def has_gcp(self):
+        return self.is_georeferenced() and self.gcp is not None
+
+    def georeference_with_gcp(self, gcp_file, output_coords_file, output_gcp_file, rerun=False):
+        if not io.file_exists(output_coords_file) or not io.file_exists(output_gcp_file) or rerun:
+            gcp = GCPFile(gcp_file)
+            if gcp.exists():
+                # Create coords file, we'll be using this later
+                # during georeferencing
+                with open(output_coords_file, 'w') as f:
+                    coords_header = gcp.wgs84_utm_zone()
+                    f.write(coords_header + "\n")
+                    log.ODM_INFO("Generated coords file from GCP: %s" % coords_header)
+
+                # Convert GCP file to a UTM projection since the rest of the pipeline
+                # does not handle other SRS well.
+                rejected_entries = []
+                utm_gcp = GCPFile(gcp.create_utm_copy(output_gcp_file, filenames=[p.filename for p in self.photos], rejected_entries=rejected_entries, include_extras=False))
+                
+                if not utm_gcp.exists():
+                    raise RuntimeError("Could not project GCP file to UTM. Please double check your GCP file for mistakes.")
+                
+                for re in rejected_entries:
+                    log.ODM_WARNING("GCP line ignored (image not found): %s" % str(re))
+                
+                if utm_gcp.entries_count() > 0:
+                    log.ODM_INFO("%s GCP points will be used for georeferencing" % utm_gcp.entries_count())
+                else:
+                    raise RuntimeError("A GCP file was provided, but no valid GCP entries could be used. Note that the GCP file is case sensitive (\".JPG\" is not the same as \".jpg\").")
+
+                self.gcp = utm_gcp
+            else:
+                log.ODM_WARNING("GCP file does not exist: %s" % gcp_file)
+                return
+        else:
+            log.ODM_INFO("Coordinates file already exist: %s" % output_coords_file)
+            log.ODM_INFO("GCP file already exist: %s" % output_gcp_file)
+            self.gcp = GCPFile(output_gcp_file)
+        
+        self.georef = ODM_GeoRef.FromCoordsFile(output_coords_file)
+        return self.georef
+
+    def georeference_with_gps(self, images_path, output_coords_file, rerun=False):
+        try:
+            if not io.file_exists(output_coords_file) or rerun:
+                location.extract_utm_coords(self.photos, images_path, output_coords_file)
+            else:
+                log.ODM_INFO("Coordinates file already exist: %s" % output_coords_file)
+            
+            self.georef = ODM_GeoRef.FromCoordsFile(output_coords_file)
+        except:
+            log.ODM_WARNING('Could not generate coordinates file. The orthophoto will not be georeferenced.')
+
+        self.gcp = GCPFile(None)
+        return self.georef
+
+    def save_proj_srs(self, file):
+        # Save proj to file for future use (unless this 
+        # dataset is not georeferenced)
+        if self.is_georeferenced():
+            with open(file, 'w') as f:
+                f.write(self.georef.proj4())
+
+    def get_photo(self, filename):
+        for p in self.photos:
+            if p.filename == filename:
+                return p
+    
 
 class ODM_GeoRef(object):
-    """docstring for ODMUtmZone"""
+    @staticmethod
+    def FromProj(projstring):
+        return ODM_GeoRef(CRS.from_proj4(projstring))
 
-    def __init__(self):
-        self.datum = 'WGS84'
-        self.epsg = None
-        self.utm_zone = 0
-        self.utm_pole = 'N'
-        self.utm_east_offset = 0
-        self.utm_north_offset = 0
-        self.gcps = []
-
-    def calculate_EPSG(self, _utm_zone, _pole):
-        """Calculate and return the EPSG"""
-        if _pole == 'S':
-            return 32700 + _utm_zone
-        elif _pole == 'N':
-            return 32600 + _utm_zone
-        else:
-            log.ODM_ERROR('Unknown pole format %s' % _pole)
-            return
-
-    def coord_to_fractions(self, coord, refs):
-        deg_dec = abs(float(coord))
-        deg = int(deg_dec)
-        minute_dec = (deg_dec - deg) * 60
-        minute = int(minute_dec)
-
-        sec_dec = (minute_dec - minute) * 60
-        sec_dec = round(sec_dec, 3)
-        sec_denominator = 1000
-        sec_numerator = int(sec_dec * sec_denominator)
-        if float(coord) >= 0:
-            latRef = refs[0]
-        else:
-            latRef = refs[1]
-
-        output = str(deg) + '/1 ' + str(minute) + '/1 ' + str(sec_numerator) + '/' + str(sec_denominator)
-        return output, latRef
-
-    def convert_to_las(self, _file, _file_out, json_file):
-
-        if not self.epsg:
-            log.ODM_ERROR('Empty EPSG: Could not convert to LAS')
-            return
-
-        kwargs = {'bin': context.pdal_path,
-                  'f_in': _file,
-                  'f_out': _file_out,
-                  'east': self.utm_east_offset,
-                  'north': self.utm_north_offset,
-                  'epsg': self.epsg,
-                  'json': json_file}
-
-        # create pipeline file transform.xml to enable transformation
-        pipeline = '{{' \
-                   '  "pipeline":[' \
-                   '    "untransformed.ply",' \
-                   '    {{' \
-                   '      "type":"filters.transformation",' \
-                   '      "matrix":"1 0 0 {east} 0 1 0 {north} 0 0 1 0 0 0 0 1"' \
-                   '    }},' \
-                   '    {{' \
-                   '      "a_srs":"EPSG:{epsg}",' \
-                   '      "offset_x":"{east}",' \
-                   '      "offset_y":"{north}",' \
-                   '      "offset_z":"0",' \
-                   '      "filename":"transformed.las"' \
-                   '    }}' \
-                   '  ]' \
-                   '}}'.format(**kwargs)
-
-        with open(json_file, 'w') as f:
-            f.write(pipeline)
-
-        # call pdal 
-        system.run('{bin}/pdal pipeline -i {json} --readers.ply.filename={f_in} '
-                   '--writers.las.filename={f_out}'.format(**kwargs))
-
-    def convert_to_dem(self, _file, _file_out, pdalJSON, sample_radius, gdal_res, gdal_radius):
-        # Check if exists f_in
-        if not io.file_exists(_file):
-            log.ODM_ERROR('LAS file does not exist')
-            return False
-
-        kwargs = {
-            'bin': context.pdal_path,
-            'f_in': _file,
-            'sample_radius': sample_radius,
-            'gdal_res': gdal_res,
-            'gdal_radius': gdal_radius,
-            'f_out': _file_out,
-            'json': pdalJSON
-        }
-
-        pipelineJSON = '{{' \
-                       '    "pipeline":[' \
-                       '        "input.las",' \
-                       '    {{' \
-                       '        "type":"filters.sample",' \
-                       '        "radius":"{sample_radius}"' \
-                       '    }},' \
-                       '    {{' \
-                       '        "type":"filters.pmf"' \
-                       '    }},' \
-                       '    {{' \
-                       '      "type":"filters.range",' \
-                       '      "limits":"Classification[2:2]"' \
-                       '    }},' \
-                       '    {{' \
-                       '        "resolution": {gdal_res},' \
-                       '        "radius": {gdal_radius},' \
-                       '        "output_type":"idw",' \
-                       '        "filename":"outputfile.tif"' \
-                       '    }}' \
-                       '    ]' \
-                       '}}'.format(**kwargs)
-
-        with open(pdalJSON, 'w') as f:
-            f.write(pipelineJSON)
-
-        system.run('{bin}/pdal pipeline {json} --readers.las.filename={f_in} '
-                   '--writers.gdal.filename={f_out}'.format(**kwargs))
-
-        if io.file_exists(kwargs['f_out']):
-            return True
-        else:
-            return False
-
-    def utm_to_latlon(self, _file, _photo, idx):
-
-        gcp = self.gcps[idx]
-
-        kwargs = {'epsg': self.epsg,
-                  'file': _file,
-                  'x': gcp.x + self.utm_east_offset,
-                  'y': gcp.y + self.utm_north_offset,
-                  'z': gcp.z}
-
-        latlon = system.run_and_return('echo {x} {y} {z} '.format(**kwargs),
-                                       'gdaltransform -s_srs \"EPSG:{epsg}\" '
-                                       '-t_srs \"EPSG:4326\"'.format(**kwargs)).split()
-
-        # Example: 83d18'16.285"W
-        # Example: 41d2'11.789"N
-        # Example: 0.998
-
-        if len(latlon) == 3:
-            lon_str, lat_str, alt_str = latlon
-        elif len(latlon) == 2:
-            lon_str, lat_str = latlon
-            alt_str = ''
-        else:
-            log.ODM_ERROR('Something went wrong %s' % latlon)
-
-        lat_frac = self.coord_to_fractions(latlon[1], ['N', 'S'])
-        lon_frac = self.coord_to_fractions(latlon[0], ['E', 'W'])
-
-        # read image metadata
-        metadata = pyexiv2.ImageMetadata(_photo.path_file)
-        metadata.read()
-
-        # set values
-
-        # GPS latitude
-        key = 'Exif.GPSInfo.GPSLatitude'
-        value = lat_frac[0].split(' ')
-        log.ODM_DEBUG('lat_frac: %s %s %s' % (value[0], value[1], value[2]))
-        metadata[key] = pyexiv2.ExifTag(key,
-                                        [Fraction(value[0]),
-                                         Fraction(value[1]),
-                                         Fraction(value[2])])
-
-        key = 'Exif.GPSInfo.GPSLatitudeRef'
-        value = lat_frac[1]
-        metadata[key] = pyexiv2.ExifTag(key, value)
-
-        # GPS longitude
-        key = 'Exif.GPSInfo.GPSLongitude'
-        value = lon_frac[0].split(' ')
-        metadata[key] = pyexiv2.ExifTag(key,
-                                        [Fraction(value[0]),
-                                         Fraction(value[1]),
-                                         Fraction(value[2])])
-
-        key = 'Exif.GPSInfo.GPSLongitudeRef'
-        value = lon_frac[1]
-        metadata[key] = pyexiv2.ExifTag(key, value)
-
-        # GPS altitude
-        altitude = abs(int(float(latlon[2]) * 100))
-        key = 'Exif.GPSInfo.GPSAltitude'
-        value = Fraction(altitude, 1)
-        metadata[key] = pyexiv2.ExifTag(key, value)
-
-        if latlon[2] >= 0:
-            altref = '0'
-        else:
-            altref = '1'
-        key = 'Exif.GPSInfo.GPSAltitudeRef'
-        metadata[key] = pyexiv2.ExifTag(key, altref)
-
-        # write values
-        metadata.write()
-
-    def parse_coordinate_system(self, _file):
-        """Write attributes to jobOptions from coord file"""
+    @staticmethod
+    def FromCoordsFile(coords_file):
         # check for coordinate file existence
-        if not io.file_exists(_file):
-            log.ODM_ERROR('Could not find file %s' % _file)
+        if not io.file_exists(coords_file):
+            log.ODM_WARNING('Could not find file %s' % coords_file)
             return
 
-        with open(_file) as f:
+        srs = None
+
+        with open(coords_file) as f:
             # extract reference system and utm zone from first line.
             # We will assume the following format:
-            # 'WGS84 UTM 17N'
-            line = f.readline()
-            log.ODM_DEBUG('Line: %s' % line)
-            ref = line.split(' ')
-            # match_wgs_utm = re.search('WGS84 UTM (\d{1,2})(N|S)', line, re.I)
-            if ref[0] == 'WGS84' and ref[1] == 'UTM':  # match_wgs_utm:
-                self.datum = ref[0]
-                self.utm_pole = ref[2][len(ref) - 1]
-                self.utm_zone = int(ref[2][:len(ref) - 1])
-                # extract east and west offsets from second line.
-                # We will assume the following format:
-                # '440143 4588391'
-                # update EPSG
-                self.epsg = self.calculate_EPSG(self.utm_zone, self.utm_pole)
-            # If the first line looks like "EPSG:n" or "epsg:n"
-            elif ref[0].split(':')[0].lower() == 'epsg':
-                self.epsg = line.split(':')[1]
-            else:
-                log.ODM_ERROR('Could not parse coordinates. Bad CRS supplied: %s' % line)
-                return
+            # 'WGS84 UTM 17N' or 'WGS84 UTM 17N \n'
+            line = f.readline().rstrip()
+            srs = location.parse_srs_header(line)
 
-            offsets = f.readline().split(' ')
-            self.utm_east_offset = int(offsets[0])
-            self.utm_north_offset = int(offsets[1])
+        return ODM_GeoRef(srs)
 
-            # parse coordinates
-            lines = f.readlines()
-            for l in lines:
-                xyz = l.split(' ')
-                if len(xyz) == 3:
-                    x, y, z = xyz[:3]
-                elif len(xyz) == 2:
-                    x, y = xyz[:2]
-                    z = 0
-                self.gcps.append(ODM_GCPoint(float(x), float(y), float(z)))
-                # Write to json file
+    def __init__(self, srs):
+        self.srs = srs
+        self.utm_east_offset = 0
+        self.utm_north_offset = 0
+        self.transform = []
+
+    def proj4(self):
+        return self.srs.to_proj4()
+    
+    def valid_utm_offsets(self):
+        return self.utm_east_offset and self.utm_north_offset
+
+    def extract_offsets(self, geo_sys_file):
+        if not io.file_exists(geo_sys_file):
+            log.ODM_ERROR('Could not find file %s' % geo_sys_file)
+            return
+
+        with open(geo_sys_file) as f:
+            offsets = f.readlines()[1].split(' ')
+            self.utm_east_offset = float(offsets[0])
+            self.utm_north_offset = float(offsets[1])
+
+    def parse_transformation_matrix(self, matrix_file):
+        if not io.file_exists(matrix_file):
+            log.ODM_ERROR('Could not find file %s' % matrix_file)
+            return
+
+        # Create a nested list for the transformation matrix
+        with open(matrix_file) as f:
+            for line in f:
+                # Handle matrix formats that either
+                # have leading or trailing brakets or just plain numbers.
+                line = re.sub(r"[\[\],]", "", line).strip()
+                self.transform += [[float(i) for i in line.split()]]
+
+        self.utm_east_offset = self.transform[0][3]
+        self.utm_north_offset = self.transform[1][3]
 
 
 class ODM_Tree(object):
-    def __init__(self, root_path, images_path):
+    def __init__(self, root_path, gcp_file = None):
         # root path to the project
         self.root_path = io.absolute_path_file(root_path)
-        if not images_path:
-            self.input_images = io.join_paths(self.root_path, 'images')
-        else:
-            self.input_images = io.absolute_path_file(images_path)
+        self.input_images = io.join_paths(self.root_path, 'images')
 
         # modules paths
 
@@ -386,21 +207,21 @@ class ODM_Tree(object):
         # order to keep track all files al directories during the
         # whole reconstruction process.
         self.dataset_raw = io.join_paths(self.root_path, 'images')
-        self.dataset_resize = io.join_paths(self.root_path, 'images_resize')
         self.opensfm = io.join_paths(self.root_path, 'opensfm')
-        self.pmvs = io.join_paths(self.root_path, 'pmvs')
+        self.mve = io.join_paths(self.root_path, 'mve')
         self.odm_meshing = io.join_paths(self.root_path, 'odm_meshing')
         self.odm_texturing = io.join_paths(self.root_path, 'odm_texturing')
         self.odm_25dtexturing = io.join_paths(self.root_path, 'odm_texturing_25d')
         self.odm_georeferencing = io.join_paths(self.root_path, 'odm_georeferencing')
-        self.odm_25dgeoreferencing = io.join_paths(self.root_path, 'odm_25dgeoreferencing')
+        self.odm_25dgeoreferencing = io.join_paths(self.root_path, 'odm_georeferencing_25d')
+        self.odm_filterpoints = io.join_paths(self.root_path, 'odm_filterpoints')
         self.odm_orthophoto = io.join_paths(self.root_path, 'odm_orthophoto')
-        self.odm_pdal = io.join_paths(self.root_path, 'pdal')
 
         # important files paths
 
         # benchmarking
         self.benchmarking = io.join_paths(self.root_path, 'benchmark.txt')
+        self.dataset_list = io.join_paths(self.root_path, 'img_list.txt')
 
         # opensfm
         self.opensfm_tracks = io.join_paths(self.opensfm, 'tracks.csv')
@@ -408,16 +229,16 @@ class ODM_Tree(object):
         self.opensfm_bundle_list = io.join_paths(self.opensfm, 'list_r000.out')
         self.opensfm_image_list = io.join_paths(self.opensfm, 'image_list.txt')
         self.opensfm_reconstruction = io.join_paths(self.opensfm, 'reconstruction.json')
-        self.opensfm_reconstruction_meshed = io.join_paths(self.opensfm, 'reconstruction.meshed.json')
-        self.opensfm_reconstruction_nvm = io.join_paths(self.opensfm, 'reconstruction.nvm')
-        self.opensfm_model = io.join_paths(self.opensfm, 'depthmaps/merged.ply')
+        self.opensfm_reconstruction_nvm = io.join_paths(self.opensfm, 'undistorted/reconstruction.nvm')
+        self.opensfm_model = io.join_paths(self.opensfm, 'undistorted/depthmaps/merged.ply')
+        self.opensfm_transformation = io.join_paths(self.opensfm, 'geocoords_transformation.txt')
 
-        # pmvs
-        self.pmvs_rec_path = io.join_paths(self.pmvs, 'recon0')
-        self.pmvs_bundle = io.join_paths(self.pmvs_rec_path, 'bundle.rd.out')
-        self.pmvs_visdat = io.join_paths(self.pmvs_rec_path, 'vis.dat')
-        self.pmvs_options = io.join_paths(self.pmvs_rec_path, 'pmvs_options.txt')
-        self.pmvs_model = io.join_paths(self.pmvs_rec_path, 'models/option-0000.ply')
+        # mve
+        self.mve_model = io.join_paths(self.mve, 'mve_dense_point_cloud.ply')
+        self.mve_views = io.join_paths(self.mve, 'views')
+
+        # filter points
+        self.filtered_point_cloud = io.join_paths(self.odm_filterpoints, "point_cloud.ply")
 
         # odm_meshing
         self.odm_mesh = io.join_paths(self.odm_meshing, 'odm_mesh.ply')
@@ -434,33 +255,114 @@ class ODM_Tree(object):
         self.odm_texuring_log = 'odm_texturing_log.txt'
 
         # odm_georeferencing
-        self.odm_georeferencing_latlon = io.join_paths(
-            self.odm_georeferencing, 'latlon.txt')
         self.odm_georeferencing_coords = io.join_paths(
             self.odm_georeferencing, 'coords.txt')
-        self.odm_georeferencing_gcp = io.join_paths(
-            self.odm_georeferencing, 'gcp_list.txt')
+        self.odm_georeferencing_gcp = gcp_file or io.find('gcp_list.txt', self.root_path)
+        self.odm_georeferencing_gcp_utm = io.join_paths(self.odm_georeferencing, 'gcp_list_utm.txt')
         self.odm_georeferencing_utm_log = io.join_paths(
             self.odm_georeferencing, 'odm_georeferencing_utm_log.txt')
         self.odm_georeferencing_log = 'odm_georeferencing_log.txt'
+        self.odm_georeferencing_transform_file = 'odm_georeferencing_transform.txt'
+        self.odm_georeferencing_proj = 'proj.txt'
         self.odm_georeferencing_model_txt_geo = 'odm_georeferencing_model_geo.txt'
-        self.odm_georeferencing_model_ply_geo = 'odm_georeferenced_model.ply'
         self.odm_georeferencing_model_obj_geo = 'odm_textured_model_geo.obj'
         self.odm_georeferencing_xyz_file = io.join_paths(
             self.odm_georeferencing, 'odm_georeferenced_model.csv')
         self.odm_georeferencing_las_json = io.join_paths(
             self.odm_georeferencing, 'las.json')
+        self.odm_georeferencing_model_laz = io.join_paths(
+            self.odm_georeferencing, 'odm_georeferenced_model.laz')
         self.odm_georeferencing_model_las = io.join_paths(
             self.odm_georeferencing, 'odm_georeferenced_model.las')
         self.odm_georeferencing_dem = io.join_paths(
             self.odm_georeferencing, 'odm_georeferencing_model_dem.tif')
-        self.odm_georeferencing_dem_json = io.join_paths(
-            self.odm_georeferencing, 'dem.json')
 
         # odm_orthophoto
-        self.odm_orthophoto_file = io.join_paths(self.odm_orthophoto, 'odm_orthophoto.png')
+        self.odm_orthophoto_render = io.join_paths(self.odm_orthophoto, 'odm_orthophoto_render.tif')
         self.odm_orthophoto_tif = io.join_paths(self.odm_orthophoto, 'odm_orthophoto.tif')
         self.odm_orthophoto_corners = io.join_paths(self.odm_orthophoto, 'odm_orthophoto_corners.txt')
         self.odm_orthophoto_log = io.join_paths(self.odm_orthophoto, 'odm_orthophoto_log.txt')
         self.odm_orthophoto_tif_log = io.join_paths(self.odm_orthophoto, 'gdal_translate_log.txt')
-        self.odm_orthophoto_gdaladdo_log = io.join_paths(self.odm_orthophoto, 'gdaladdo_log.txt')
+
+        # Split-merge 
+        self.submodels_path = io.join_paths(self.root_path, 'submodels')
+
+        # Tiles
+        self.entwine_pointcloud = self.path("entwine_pointcloud")
+
+    def path(self, *args):
+        return os.path.join(self.root_path, *args)
+
+
+class ODM_Stage:
+    def __init__(self, name, args, progress=0.0, **params):
+        self.name = name
+        self.args = args
+        self.progress = progress
+        self.params = params
+        if self.params is None:
+            self.params = {}
+        self.next_stage = None
+        self.prev_stage = None
+
+    def connect(self, stage):
+        self.next_stage = stage
+        stage.prev_stage = self
+        return stage
+
+    def rerun(self):
+        """
+        Does this stage need to be rerun?
+        """
+        return (self.args.rerun is not None and self.args.rerun == self.name) or \
+                     (self.args.rerun_all) or \
+                     (self.args.rerun_from is not None and self.name in self.args.rerun_from)
+    
+    def run(self, outputs = {}):
+        start_time = system.now_raw()
+        log.ODM_INFO('Running %s stage' % self.name)
+
+        self.process(self.args, outputs)
+
+        # The tree variable should always be populated at this point
+        if outputs.get('tree') is None:
+            raise Exception("Assert violation: tree variable is missing from outputs dictionary.")
+
+        if self.args.time:
+            system.benchmark(start_time, outputs['tree'].benchmarking, self.name)
+
+        log.ODM_INFO('Finished %s stage' % self.name)
+        self.update_progress_end()
+
+        # Last stage?
+        if self.args.end_with == self.name or self.args.rerun == self.name:
+            log.ODM_INFO("No more stages to run")
+            return
+
+        # Run next stage?
+        elif self.next_stage is not None:
+            self.next_stage.run(outputs)
+
+    def delta_progress(self):
+        if self.prev_stage:
+            return max(0.0, self.progress - self.prev_stage.progress)
+        else:
+            return max(0.0, self.progress)
+    
+    def previous_stages_progress(self):
+        if self.prev_stage:
+            return max(0.0, self.prev_stage.progress)
+        else:
+            return 0.0
+
+    def update_progress_end(self):
+        self.update_progress(100.0)
+
+    def update_progress(self, progress):
+        progress = max(0.0, min(100.0, progress))
+        progressbc.send_update(self.previous_stages_progress() + 
+                              (self.delta_progress() / 100.0) * float(progress))
+
+    def process(self, args, outputs):
+        raise NotImplementedError
+
